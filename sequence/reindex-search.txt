@@ -4,23 +4,40 @@ autonumber
 
 note over Developer: Request made by a developer logging on to\nthe publishing server to trigger a reindex job
 
-Developer->Search-Reindex-API: Http: POST Reindex job
-Search-Reindex-API->MongoDB: TCP/IO socket: Retrieve list of jobs status in-progress
-Search-Reindex-API->MongoDB: TCP/IO socket: Create new job doc
-Search-Reindex-API->Elasticsearch: Http: Create new sitewide (ONS) search index
-Search-Reindex-API->Go-routine: Go routine to create events for all collections
-Search-Reindex-API->DP-Developer: Http Successful response: 
-Go-routine->Zebedee: Http: Retrieve list of collections
-Go-routine->MongoDB: TCP/IO socket: Update reindex job
-Go-routine-->Search-Data-Extractor: TCP: Kafka message
-Search-Data-Extractor->Zebedee: Http: GET Docs from collection
-Zebedee->Zebedee-Content: I/O: READ JSON file from disc
-Search-Data-Extractor->Dataset-API: Http: GET CMD dataset docs for collection
-Dataset-API->MongoDB: TCP/IO socket: Find all datasets for collection
-Search-Data-Extractor-->Search-Builder: TCP: Kafka message
-Search-Builder->ElasticSearch: HTTPS: Bulk query
-Search-Builder->Search-Reindex-API: Http: Update reindex job doc count
-Search-Reindex-API->MongoDB: TCP/IO socket: Update job doc
-Search-Reindex-API->Elasticsearch: Http: Validate search index document count
-Search-Reindex-API->Elasticsearch: Http: Multi-operational request to update aliases 
-Search-Reindex-API->MongoDB: TCP/IO socket: Update reindex job state to completed
+Developer->Search Reindex API: Http: POST Reindex job
+
+note over Search Reindex API: Validate a search reindex is not already in progress
+
+Search Reindex API->MongoDB: TCP/IO socket: Retrieve list of job status of in-progress
+Search Reindex API->MongoDB: TCP/IO socket: Create new job doc
+Search Reindex API->Elasticsearch: Http: Create new sitewide (new-ONS) search index
+Search Reindex API->Go routine: Go routine to create events for all collections
+Search Reindex API->Developer: Http Successful response
+
+Go routine->Zebedee: Http: Retrieve list of collections
+
+note over Go routine: Add search document\ncounts for reindex job
+
+Go routine->MongoDB: TCP/IO socket: Update reindex job
+Go routine-->Search Data Extractor: TCP: Kafka message
+
+Search Data Extractor->Zebedee: Http: GET Docs from collection
+
+Zebedee->Zebedee Content: I/O: READ JSON file from disc
+
+Search Data Extractor->Dataset API: Http: GET CMD dataset docs for collection
+
+Dataset API->MongoDB: TCP/IO socket: Find all datasets for collection
+
+Search Data Extractor-->Search Data Importer: TCP: Kafka message
+
+Search Data Importer->Elasticsearch: Http: Bulk query to add\ndocs to search index
+Search Data Importer->Search Reindex API: Http: Update uploaded document count for reindex job
+
+Search Reindex API->MongoDB: TCP/IO socket: Update job doc
+
+note over Search Reindex API: If uploaded document counts does not match\nthe total document count, skip 18-20
+
+Search Reindex API->Elasticsearch: Http: Validate search index document count
+Search Reindex API->Elasticsearch: Http: Multi-operational request to update aliases 
+Search Reindex API->MongoDB: TCP/IO socket: Update reindex job state to completed
