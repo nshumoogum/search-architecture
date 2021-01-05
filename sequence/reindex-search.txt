@@ -1,0 +1,26 @@
+title Reindex Sitewide Search
+
+autonumber
+
+note over Developer: Request made by a developer logging on to\nthe publishing server to trigger a reindex job
+
+Developer->Search-Reindex-API: Http: POST Reindex job
+Search-Reindex-API->MongoDB: TCP/IO socket: Retrieve list of jobs status in-progress
+Search-Reindex-API->MongoDB: TCP/IO socket: Create new job doc
+Search-Reindex-API->Elasticsearch: Http: Create new sitewide (ONS) search index
+Search-Reindex-API->Go-routine: Go routine to create events for all collections
+Search-Reindex-API->DP-Developer: Http Successful response: 
+Go-routine->Zebedee: Http: Retrieve list of collections
+Go-routine->MongoDB: TCP/IO socket: Update reindex job
+Go-routine-->Search-Data-Extractor: TCP: Kafka message
+Search-Data-Extractor->Zebedee: Http: GET Docs from collection
+Zebedee->Zebedee-Content: I/O: READ JSON file from disc
+Search-Data-Extractor->Dataset-API: Http: GET CMD dataset docs for collection
+Dataset-API->MongoDB: TCP/IO socket: Find all datasets for collection
+Search-Data-Extractor-->Search-Builder: TCP: Kafka message
+Search-Builder->ElasticSearch: HTTPS: Bulk query
+Search-Builder->Search-Reindex-API: Http: Update reindex job doc count
+Search-Reindex-API->MongoDB: TCP/IO socket: Update job doc
+Search-Reindex-API->Elasticsearch: Http: Validate search index document count
+Search-Reindex-API->Elasticsearch: Http: Multi-operational request to update aliases 
+Search-Reindex-API->MongoDB: TCP/IO socket: Update reindex job state to completed

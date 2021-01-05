@@ -1,0 +1,13 @@
+title Add/Update search documents when a collection is published
+
+autonumber
+
+note over Zebedee: Florence user published a collection\ntriggering an update to sitewide search
+
+Zebedee-->Search-Data-Extractor: TCP: Kafka message
+Search-Data-Extractor->Zebedee: Https Get: Retrieve docs from collection
+Zebedee->Zebedee Content: I/O: READ JSON file from disc
+Search-Data-Extractor->Dataset-API: Http: GET dataset docs for collection
+Dataset-API->MongoDB: TCP/IO socket: Find all datasets for collection
+Search-Data-Extractor-->Search-Builder: TCP: Kafka message
+Search-Builder->ElasticSearch: Http: GET Multi-operational request to update/add docs 
