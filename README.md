@@ -114,9 +114,7 @@ See [Bulk API](https://www.elastic.co/guide/en/elasticsearch/reference/current/d
 **1: Http POST Reindex job**
 
 ```
-Datastore: elasticsearch
-
-Path: /search-reindex/jobs
+Path: /jobs
 Path parameters: none
 Header: Authorization: Bearer <token>
 Body: none
@@ -152,10 +150,12 @@ BSON Document: {
     "id": string, // Generated unique id
     "last_updated": ISODate, // ISO8601 timestamp
     "links" : {
-        "self" : string // format: http://localhost:<PORT>/search-reindex/jobs/<id>
+        "self" : string, // format: http://localhost:<PORT>/jobs/<id>
+        "tasks": string, // format: http://localhost:<PORT>/jobs/<id>/tasks
     },
-    "reindex_started": ISODate, // ISO8601 timestamp
     "reindex_completed": ISODate, // Empty
+    "reindex_failed": ISODate, // Empty
+    "reindex_started": ISODate, // ISO8601 timestamp
     "search_index_name": string, // format: {ONS-<ISO8601 timestamp>}
     "state": string // set to in-progress
 }
@@ -217,26 +217,36 @@ Body: {
     "id": string, // unique id for job
     "last_updated": ISODate, // ISO8601 timestamp
     "links" : {
-        "self" : string // format: http://localhost:<PORT>/search-reindex/jobs/<id>
+        "self" : string // format: http://localhost:<PORT>/jobs/<id>
+        "tasks": string // format: http://localhost:<PORT>/jobs/<id>/tasks
     },
     "reindex_started": ISODate, // ISO8601 timestamp
     "search_index_name": string, // format: {ONS-<ISO8601 timestamp>}
     "state": string // set to in-progress
-    "import_task": {
-        "datasets_api": {
-            "count": integer,
-            "state": string // Enum, set to created
-        },
-        "zebedee": {
-            "count": integer,
-            "state": string // Enum, set to created
-        }
-    },
     "total_search_documents": integer
 }
 ```
 
-**9: Trigger extraction of search docs**
+**9: Update Reindex job - number_of_tasks**
+
+```
+Method: PUT
+Path: /jobs/{id}/number_of_tasks/{count}
+```
+
+**10: Update job doc in mongoDB with number_of_tasks**
+
+```
+Datastore: mongoDB
+Database: search
+Collection: jobs
+
+BSON Document: {
+    "number_of_tasks": integer
+}
+```
+
+**11: Trigger extraction of search docs**
 
 Trigger Zebedee to retrieve all searchable documents via it's API, it should extract the data from master folder as we are only interested in published data.
 
@@ -247,48 +257,76 @@ Method: POST
 Path: /search-content/reindex
 ```
 
-**10: Read JSON files from disc**
+**12: Read JSON files from disc**
 
 Read `data.json` files under master directory.
 
-**11: Update Reindex job with Zebedee searchable documents**
+**13: Create Zebedee Task for reindex job**
 
-Update sub document zebedee with count
+Create zebedee task
 
 ```
 API: Search Reindex
 
-Method: PUT
-Path: /search-reindex/jobs/{id}/tasks/{name of API}/{count}
+Method: POST
+Path: /jobs/{id}/tasks/{task}
+Body: {"number_of_documents": integer}
 ```
 
-where `name of API` is set to zebedee.
+where `task` is set to zebedee.
 
-**12: Update Reindex job - Zebedee task**
+```
+Status Code: 201
+Body: {
+    "job_id": string,
+    "last_updated": ISODate, // ISO8601 timestamp
+    "links" : {
+        "self" : string // format: http://localhost:<PORT>/jobs/<job_id>/tasks/
+        "job": string // format: http://localhost:<PORT>/jobs/<job_id>/tasks/<task>
+    },
+    "number_of_documents": integer,
+    "task": string // the API the task relates to, in this case zebedee
+}
+```
 
-Zebedee sub document updated with new count value.
+**14: Create Zebedee task in datastore**
 
-Add to the `total_search_documents` count for searchable content from Zebedee.
+Zebedee task created with number_of_documents set.
+
+```
+Datastore: mongoDB
+Database: search
+Collection: tasks
+Document Identifier: `job_id` and `task` fields
+
+BSON Document create: {
+    "job_id": string,
+    "last_updated": ISODate, // ISO8601 timestamp
+    "links" : {
+        "self" : string // format: http://localhost:<PORT>/jobs/<job_id>/tasks/
+        "job": string // format: http://localhost:<PORT>/jobs/<job_id>/tasks/<task>
+    },
+    "number_of_documents": integer,
+    "task": string // the API the task relates to, in this case zebedee
+}
+```
+
+Also update the reindex job, add the `number_of_documents`
+for Zebedee task to the existing `total_search_documents` count.
 
 ```
 Datastore: mongoDB
 Database: search
 Collection: jobs
-Document Identifier (id): job.id
+Document Identifier (id): job_id
 
 BSON Document update: {
     "last_updated": ISODate, // ISO8601 timestamp
-    "import_tasks": {
-        "zebedee": {
-            "count": integer,
-            "state": string // This should be set to in-progress if count is not equal to 0
-        },
-    },
     "total_search_documents": integer
 }
 ```
 
-**13: Send Kafka messages**
+**15: Send Kafka messages**
 
 For each data type stored against Zebedee send a message to kafka topic.
 
@@ -313,7 +351,7 @@ Record: {
 }
 ```
 
-**14: Retrieve list of datasets from Dataset API**
+**16: Retrieve list of datasets from Dataset API**
 
 Call Dataset API to retrieve a count of the number of (cmd) datasets as well as a list of datasets.
 
@@ -322,42 +360,72 @@ Method: GET
 Path: /datasets?state=published
 ```
 
-**15: Update Reindex job with total_search_documents**
+**17: Create Dataset API Task for reindex job**
 
-Add to the `total_search_documents` count for searchable content from dataset API.
+Create Dataset API task
 
 ```
 API: Search Reindex
 
-Method: PUT
-Path: /search-reindex/jobs/{id}/total-search-documents/{count}
+Method: POST
+Path: /jobs/{id}/tasks/{task}
+Body: {"number_of_documents": integer}
 ```
 
-**16: Update Reindex job - Dataset API task**
+where `task` is set to dataset-api.
 
-Dataset API sub document updated with new count value.
+```
+Status Code: 201
+Body: {
+    "job_id": string,
+    "last_updated": ISODate, // ISO8601 timestamp
+    "links" : {
+        "self" : string // format: http://localhost:<PORT>/jobs/<job_id>/tasks/
+        "job": string // format: http://localhost:<PORT>/jobs/<job_id>/tasks/<task>
+    },
+    "number_of_documents": integer,
+    "task": string // the API the task relates to, in this case dataset-api
+}
+```
 
-Add to the `total_search_documents` count for searchable content from Dataset API.
+**18: Create Dataset API task in datastore**
+
+Dataset API task created with number_of_documents set.
+
+```
+Datastore: mongoDB
+Database: search
+Collection: tasks
+Document Identifier: `job_id` and `task` fields
+
+BSON Document create: {
+    "job_id": string,
+    "last_updated": ISODate, // ISO8601 timestamp
+    "links" : {
+        "self" : string // format: http://localhost:<PORT>/jobs/<job_id>/tasks/
+        "job": string // format: http://localhost:<PORT>/jobs/<job_id>/tasks/<task>
+    },
+    "number_of_documents": integer,
+    "task": string // the API the task relates to, in this case zebedee
+}
+```
+
+Also update the reindex job, add the `number_of_documents`
+for dataset API task to the existing `total_search_documents` count.
 
 ```
 Datastore: mongoDB
 Database: search
 Collection: jobs
-Document Identifier (id): job.id
+Document Identifier (id): job_id
 
 BSON Document update: {
     "last_updated": ISODate, // ISO8601 timestamp
-    "import_tasks": {
-        "dataset_api": {
-            "count": integer,
-            "state": string // This should be set to in-progress if count is not equal to 0
-        },
-    },
     "total_search_documents": integer
 }
 ```
 
-**17: Send Kafka messages**
+**19: Send Kafka messages**
 
 For each dataset doc send a message to kafka topic 
 
@@ -382,7 +450,7 @@ Record: {
 }
 ```
 
-**18 Bulk query to add docs to search index**
+**20: Bulk query to add docs to search index**
 
 Documents received via consumption of kafka topic `search-data-import`, store documents in memory until 500 messages consumed or time from first 
 message exceeded 5 seconds before making bulk request. 5 second limit will allow for the last set of messages to still be reindexed.
@@ -398,14 +466,18 @@ Body: Depends on data type
 
 See [Bulk API](https://www.elastic.co/guide/en/elasticsearch/reference/current/docs-bulk.html)
 
-**19: Update uploaded document count for reindex job**
+Extension to handle failure scenarios:
+
+If bulk request fails then we should requeue events consumed with an additional attempts field. Once an event has failed more than 3 attempts, we should send request to reindex API to update state to failed and not requeue event. (Design needs to be thought through - should we be using a new kafka topic to handle these events?)
+
+**21: Update uploaded document count for reindex job**
 
 ```
 Method: PUT 
-Path: /search-reindex/jobs/{id}/inserted-documents/{count}
+Path: /jobs/{id}/inserted-documents/{count}
 ```
 
-**20 Update job doc**
+**22: Update job doc**
 
 ```
 Datastore: mongoDB
@@ -414,15 +486,16 @@ Collection: jobs
 Document Identifier (id): job.id
 
 BSON Document update: {
+    "last_updated": ISODate, // ISO8601 timestamp
     "total_inserted_search_documents": integer
 }
 ```
 
 *Note: When updating the count, this should be adding to the current value*
 
-Check counts match: `"total_inserted_search_documents" is equal to "total_search_documents"` and all import tasks are in a state of `in-progress`
+Check counts match: `"total_inserted_search_documents" is equal to "total_search_documents"` and `number_of_tasks` is equal to the number of tasks returned requesting a list of tasks for particular job id in datastore
 
-**21 POST ONS alias to search index**
+**23: POST ONS alias to search index**
 
 Call elasticsearch to check the index count matches the `total_search_documents` value.
 
@@ -433,7 +506,7 @@ Method: POST
 Path: /search/{index}/alias
 ```
 
-**22 Validate search index document count**
+**24: Validate search index document count**
 
 Call elasticsearch to check the index count matches the `total_search_documents` value.
 
@@ -446,7 +519,7 @@ Path: /{index}/_count
 
 Wait before making a new request (attempt) to a maximum of 3?
 
-**23 Multi-operational request to update aliases**
+**25: Multi-operational request to update aliases**
 
 See [index alias API](https://www.elastic.co/guide/en/elasticsearch/reference/current/indices-aliases.html) to see how this is done
 
@@ -468,7 +541,7 @@ Body: {
 Note: alias `new-ONS` may not be needed in performing a reindex, it may just be less cumbersome and more obvious to a developer to use
 new-ONS and ONS to refer to the new index and an existing index respectively instead of the index name (e.g. comparing 2 ONS-<datetime> values).
 
-**24 Update Reindex job state to completed**
+**26: Update Reindex job state to completed**
 
 ```
 Datastore: mongoDB
@@ -478,14 +551,6 @@ Document Identifier (id): job.id
 
 BSON Document update: {
     "last_updated": ISODate, // ISO8601 timestamp
-    "import_tasks": {
-        "zebedee": {
-            "state": "completed"
-        },
-        "dataset_api": {
-            "state": "completed"
-        },
-    },
     "reindex_completed": ISODate,
     "state": "completed"
 }
@@ -493,4 +558,30 @@ BSON Document update: {
 
 **Note**
 
-If the reindex job fails, we should be updating the job document accordingly with a `"reindex_failed": ISODate, "state": "failed"` and corresponding updates to the tasks.
+If the reindex job fails, we should be updating the job document accordingly with a `"reindex_failed": ISODate, "state": "failed"`.
+
+Use the following PUT endpoint on Search Reindex API:
+
+Update Reindex Job state to failed
+
+```
+API: Search Reindex
+
+Method: PUT
+Path: /jobs/{id}/state/{state} // where state is set to "failed"
+```
+
+Search Reindex API -> datastore
+
+```
+Datastore: mongoDB
+Database: search
+Collection: jobs
+Document Identifier (id): job.id
+
+BSON Document update: {
+    "last_updated": ISODate, // ISO8601 timestamp
+    "reindex_failed": ISODate,
+    "state": "failed"
+}
+```
