@@ -12,9 +12,9 @@ To update a diagram:
 - Export as an image on [sequencediagram.org](http://sequencediagram.org)
 - Copy the updated source script back into `sequence/<name>.txt` and commit.
 
-### Add/update search documents when a collection is published
+### Search Data Pipeline - Add/update search documents when a collection is published
 
-![Publish Search Data](sequence/PublishSearchData.png)
+![Publish Search Data](sequence/publish-search-pipeline/publish-search-pipeline.png)
 
 #### Steps
 
@@ -105,9 +105,16 @@ The search document should set an `_id` field that matches the unique identifier
 
 See [Bulk API](https://www.elastic.co/guide/en/elasticsearch/reference/current/docs-bulk.html)
 
-### Reindex
+## Search Reindex Pipeline
 
-![Reindex Search](sequence/ReindexSearch.png)
+Sequence diagram split between 3 parts:
+- [Trigger Search Reindex Pipeline](#trigger-search-reindex-pipeline)
+- [Continuation using Search Data Pipeline](#search-data-pipeline---addupdate-search-documents-when-a-collection-is-published)
+- [Tracking Search Reindex](#tracking-search-reindex-job)
+
+### Trigger Search Reindex Pipeline
+
+![Reindex Search](sequence/trigger-search-reindex-pipeline/trigger-search-reindex-pipeline.png)
 
 #### Steps
 
@@ -585,3 +592,9 @@ BSON Document update: {
     "state": "failed"
 }
 ```
+
+### Tracking Search Reindex Job
+
+![Tracking search reindex job](sequence/trigger-search-reindex-tracker/trigger-search-reindex-tracker.png)
+
+#### Steps
