@@ -13,15 +13,15 @@ note over Kafka content updated: Messages produced by a reindex job, see\n"Part 
 
 Kafka content updated-->Search Data Extractor: TCP: Consume Kafka message
 
-Search Data Extractor->Zebedee: Https Get: Retrieve docs from collection
+Search Data Extractor->Zebedee: Https Get: Zebedee resource
 
 database Zebedee Content
 Zebedee->Zebedee Content: I/O: READ JSON file from disc
 
-Search Data Extractor->Dataset API: Http: GET dataset docs for collection
+Search Data Extractor->Dataset API: Http: GET Dataset resource
 
 database Mongo DB
-Dataset API->Mongo DB: TCP/IO socket: Find all datasets\n                             for collection
+Dataset API->Mongo DB: TCP/IO socket: Find dataset
 
 database Kafka search data import
 Search Data Extractor-->Kafka search data import: TCP: Produce Kafka message
@@ -35,4 +35,4 @@ note over Search Data Importer: If the batch request to Elasticsearch\nis for a 
 database Kafka search data imported
 Search Data Importer-->Kafka search data imported: TCP: Produce Kafka message
 
-note over Kafka search data imported: The search data imported topic is consumed\nby the Search Data Extractor, see\n"Part 3 - Trigger Search Reindex Tracker"\nfor continuation of the reindex pipeline
+note over Kafka search data imported: The search data imported topic is consumed\nby the Search Import Tracker, see\n"Part 3 - Trigger Search Reindex Tracker"\nfor continuation of the reindex pipeline

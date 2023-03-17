@@ -4,9 +4,9 @@ autonumber
 
 entryspacing 1.0
 
-participant Kafka reindex requested
-participant Kafka reindex task counts
-participant Kafka search data imported
+database Kafka reindex requested
+database Kafka reindex task counts
+database Kafka search data imported
 
 note over Kafka reindex requested: Message produced by an event\nfrom the Search Reindex API, see\n"Part 1 Trigger Search Reindex"
 
@@ -51,3 +51,5 @@ API Router->Search API: Http: Swap Aliases over\n         to new ES index
 
 database Elasticsearch
 Search API->Elasticsearch: Http: Multisearch: query\n         - Swap over aliases\n         - Remove old index
+
+Search Reindex API->Mongo DB: TCP/IO socket: Update job document\nstate set to completed

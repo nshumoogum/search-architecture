@@ -22,47 +22,44 @@ Pre-requisite steps to publishing data not in this workflow as we will not be ch
 on from a florence (DP internal user) publishes a collection that can contain 1 to many ons webpages or datasets by making a request to zebedee
 which does he publishing of new webpages or updates to existing pages and lastly triggering updates to sitewide search; which is where the flow begins.
 
-**1: Kafka messages**
+**1: Consume Kafka messages**
 
-On publishing a collection, write kafka message
+On publishing a collection, consume kafka message
 
 ```
 Datastore: kafka
 
-Topic: search-data-extraction
+Topic: content-updated
 Record: {
-    "job_id": string, // Empty
-    "collection_id": string,
-    "search_index": string // Use alias, `ONS`
+    "uri": string, // mandatory
+    "search_index": string, // mandatory
+    "data_type": string, // mandatory
+    "collection_id": string, // optional
+    "job_id": string // optional (used for reindex pipeline)
 }
 ```
 
-**2: Retrieve docs for collection**
+The `search_index` field should be set to the search index alias, `ONS` for publishing new content. Only search reindexes will make use of the actual index name, e.g. `ons_<timestamp>`.
 
-Consume kafka message in 1 and request Collection docs from Zebedee API endpoint.
+**2: Retrieve Zebedee resource**
+
+Retrieve resource from Zebedee API endpoint based on the uri in kafka maessage.
 
 **3: Read JSON file from disc**
 
-Retrieve a list of documents for a specific collection from zebedee content (files on disc)
+Retrieve single document from zebedee content (files on disc).
 
-**4: Get dataset docs for collection**
+**4: Retrieve dataset resource**
 
-This could be in parallel with 2 to increase performance.
+Retrieve resource from Dataset API endpoint based on the uri in kafka maessage.
 
-```
-Method: GET
-Path: /datasets?collection_id=<collection id>
-```
+*Note: No parellisation with 2 as each of these are triggered by separate kafka messages*
 
-*Note: Dataset API needs to be extended to handle query parameter*
+**5: Find latest version of dataset**
 
-**5: Find all datasets for collection**
+Find one document from Mongo db representing the resource on given uri.
 
-Call mongoDB with Find query include filter on collection id
-
-**6: Kafka messages**
-
-For each data type send a message to kafka topic 
+**6: Produce event to search-data-import**
 
 ```
 Datastore: kafka
@@ -85,14 +82,19 @@ Record: {
 }
 ```
 
-**7: Get Multi-operational request to update/add docs**
+See [full schema here](https://github.com/ONSdigital/dp-search-data-extractor/blob/develop/schema/schema.go#L25)
 
-Documents received via consumption of kafka topic `search-data-import`, store documents in memory until 500 messages consumed or time from first 
-message exceeded 5 seconds before making bulk request. 5 second limit will allow for the last set of messages to still be reindexed.
+**7: Consume event from search-data-import**
+
+Kafka message consumed by Search Data Importer. Documents received via consumption of kafka topic `search-data-import`, store documents in memory until 500 messages consumed or time from first message exceeded 5 seconds before making bulk request. 5 second limit will allow for the last set of messages to still be reindexed.
+
+**Note: For search reindex process, we create separate batches based on the search index name; this way we can insert documents to the correct index for both reindex jobs and publishing new content and data**
+
+**8: Multi-operational request to update/add docs to an index**
 
 ```
-Datastore: elasticsearch
-Index: ONS
+Datastore: Elasticsearch
+Index: ons *or* ons_<timestamp> // should be using the value in consumed kafka event
 
 Method: POST
 Header: 'Content-Type: application/json'
@@ -105,6 +107,20 @@ The search document should set an `_id` field that matches the unique identifier
 
 See [Bulk API](https://www.elastic.co/guide/en/elasticsearch/reference/current/docs-bulk.html)
 
+**9: Produce event to search data imported**
+
+If the batch of documents was for a reindex job, then produce event for the search reindex tracker.
+
+```
+Datastore: kafka
+
+Topic: search-data-imported
+Record: {
+    "job_id": string, // mandatory
+    "number_of_search_documents // mandatory
+}
+```
+
 ## Search Reindex Pipeline
 
 Sequence diagram split between 3 parts:
@@ -114,11 +130,11 @@ Sequence diagram split between 3 parts:
 
 ### Trigger Search Reindex Pipeline
 
-![Reindex Search](sequence/trigger-search-reindex-pipeline/trigger-search-reindex-pipeline.png)
+![Trigger Search Reindex](sequence/trigger-search-reindex-pipeline/trigger-search-reindex-pipeline.png)
 
 #### Steps
 
-**1: Http POST Reindex job**
+**1: Http POST Reindex job via API Router**
 
 ```
 Path: /jobs
@@ -126,14 +142,18 @@ Path parameters: none
 Header: Authorization: Bearer <token>
 Body: none
 ```
+**2: Reverse Proxy to Search Reindex (micro) API**
 
-**2: Retrieve list of in-progress jobs**
+API router will authenticate the user or service before sending
+on request via reverse proxy and then store the outcome in audit system.
+
+**3: Retrieve list of in-progress jobs**
 
 ```
 Datastore: mongoDB
 Database: search
 Collection: jobs
-Filter job docs by state and time
+Query: Filter job docs by state and time
 
 BSON Document: {
     "state": string, // enumurated list, in-progress, failed, completed
@@ -146,12 +166,13 @@ BSON Document: {
 **Validation** - Check there are no jobs that are in-progress and created within the last hour (depends on how long a reindex takes).
 If validation fails return status code 409 (conflict), message 'existing reindex job in progress'.
 
-**3: Create new job doc in mongoDB**
+**4: Create new job doc in mongoDB**
 
 ```
 Datastore: mongoDB
 Database: search
 Collection: jobs
+Query: Insert
 
 BSON Document: {
     "id": string, // Generated unique id
@@ -168,7 +189,7 @@ BSON Document: {
 }
 ```
 
-**4: Create new sitewide search index via Search API**
+**5: Create new sitewide search index via Search API**
 
 Call search API to create new index.
 
@@ -179,7 +200,7 @@ Path: /search
 
 Response must include the search index name.
 
-**5: Create new sitewide search index (new-ONS)**
+**6: Create new sitewide search index (ONS_<timestamp>)**
 
 Call elasticsearch cluster to create new index.
 
@@ -187,13 +208,14 @@ Call elasticsearch cluster to create new index.
 Index: ONS-<ISO8601 timestamp>
 ```
 
-**6: Update job document with search_index_name**
+**7: Update job document with search_index_name**
 
 ```
 Datastore: mongoDB
 Database: search
 Collection: jobs
-Query Method: Upsert
+Query: Upsert
+Document Identifier: job_id
 
 BSON Document: {
     "last_updated": ISODate, // ISO8601 timestamp
@@ -201,22 +223,21 @@ BSON Document: {
 }
 ```
 
-**7: Send kafka messages**
+**8: Send kafka messages**
 
 Send a message to kafka topic
 
 ```
 Datastore: kafka
 
-Topic: search-data-extraction
+Topic: reindex-requested
 Record: {
     "job_id": string,
-    "collection_id": string, // Empty
     "search_index": string
 }
 ```
 
-**8: Successful response**
+**9 & 10: Successful response**
 
 ```
 Status Code: 201
@@ -234,299 +255,317 @@ Body: {
 }
 ```
 
-**9: Update Reindex job - number_of_tasks**
+**11: Consume Kafka message from reindex-requested**
+
+1. Search Reindex Tracker consumes message, see [Tracking Search Reindex](#tracking-search-reindex-job)
+1. Search Data Finder consumes message, continue
 
 ```
-Method: PUT
-Path: /jobs/{id}/number_of_tasks/{count}
+Datastore: kafka
+
+Topic: reindex-requested
+Record: {
+    "job_id": string, // mandatory
+    "search_index": string // mandatory
+}
 ```
 
-**10: Update job doc in mongoDB with number_of_tasks**
+See schema [here](https://github.com/ONSdigital/dp-search-data-finder/blob/develop/schema/schema.go)
+
+**12: Retrieve a list of urls for all published data on Zebedee**
+
+By calling the published data endpoint
+
+**13: Produce Kafka message to reindex-task-counts for Zebedee uris**
+
+Search Reindex Tracker consumes message, see [Tracking Search Reindex](#tracking-search-reindex-job)
+
+```
+Datastore: kafka
+
+Topic: reindex-task-counts
+Record: {
+    "job_id": string, // mandatory
+    "task": string, // mandatory
+    "extraction_completed": bool, // mandatory
+    "count": integer // mandatory
+}
+```
+
+See schema [here](https://github.com/ONSdigital/dp-search-data-finder/blob/develop/schema/schema.go)
+
+Continuation of Search Reindex takes place by the Search Reindex Tracker consuming messages from the `reindex-task-counts` topic.
+
+**14: Retrieve a list of urls for all published data on Dataset API**
+
+By calling the datasets endpoint, then dataset editions endpoint.
+
+**Note: Step 14 can be done in parallel with 12**
+
+**15: Produce Kafka message to reindex-task-counts for dataset API uris**
+
+See Step 13
+
+**15: Produce Kafka message per url to content-updated topic**
+
+For every url returned by Zebedee and the dataset API, there should be an equivalent message produced to the `content-updated` topic.
+
+```
+Datastore: kafka
+
+Topic: content-updated
+Record: {
+    "uri": string, // mandatory
+    "job_id": string, // mandatory
+    "search_index": string, // mandatory
+    "data_type": string // mandatory
+}
+```
+
+See schema [here](https://github.com/ONSdigital/dp-search-data-finder/blob/develop/schema/schema.go)
+
+Continuation of Search Reindex takes place by the Search Data Extractor consuming messages from the `content-updated` topic.
+
+### Tracking Search Reindex Job
+
+![Tracking search reindex job](sequence/trigger-search-reindex-tracker/trigger-search-reindex-tracker.png)
+
+#### Steps
+
+**1: Consume Kafka message from kafka reindex requested**
+
+Tracker identifies a reindex job has started
+
+```
+Topic: reindex-requested
+Record: {
+    "job_id": string, // mandatory
+    "search_index": string // mandatory
+}
+```
+
+See schema [here](https://github.com/ONSdigital/dp-search-reindex-tracker/blob/develop/schema/schema.go)
+
+**2: Update Reindex job - state to in-progress**
+
+```
+Method: PATCH
+Path: /jobs/{id}
+Body: [
+    {
+        "op": "replace",
+        "path": "/state",
+        "value": "in-progress"
+    }
+]
+```
+
+See [Search Reindex API swagger spec](https://github.com/ONSdigital/dp-search-reindex-api/blob/develop/swagger.yaml)
+
+**3: Update reindex job document**
 
 ```
 Datastore: mongoDB
 Database: search
 Collection: jobs
+Query: FindOne
+Document Identifier: job_id
 
 BSON Document: {
-    "number_of_tasks": integer
+    "state": "in-progress"
 }
 ```
 
-**11: Trigger extraction of search docs**
+**4: Consume Kafka message from kafka reindex task counts**
 
-Trigger Zebedee to retrieve all searchable documents via it's API, it should extract the data from master folder as we are only interested in published data.
+Tracker consumes messages from the reindex task counts topic, to update
+the number of expected documents to be stored in Elasticsearch index
+against a single task of a job.
 
 ```
-API: Zebedee
+Topic: reindex-task-counts
+Record: {
+    "job_id": string, // mandatory
+    "task": string, // mandatory
+    "extraction_completed": bool, // mandatory
+    "count": integer // mandatory
+}
+```
 
+If the extraction_completed is set to true then the Search Reindex Tracker will
+need to update the flag against the reindex job. See next step.
+
+See schema [here](https://github.com/ONSdigital/dp-search-reindex-tracker/blob/develop/schema/schema.go)
+
+**5: Create task for Reindex Job**
+
+```
 Method: POST
-Path: /search-content/reindex
-```
-
-**12: Read JSON files from disc**
-
-Read `data.json` files under master directory.
-
-**13: Create Zebedee Task for reindex job**
-
-Create zebedee task
-
-```
-API: Search Reindex
-
-Method: POST
-Path: /jobs/{id}/tasks/{task}
-Body: {"number_of_documents": integer}
-```
-
-where `task` is set to zebedee.
-
-```
-Status Code: 201
+Path: /jobs/{id}/tasks
 Body: {
-    "job_id": string,
-    "last_updated": ISODate, // ISO8601 timestamp
-    "links" : {
-        "self" : string // format: http://localhost:<PORT>/jobs/<job_id>/tasks/
-        "job": string // format: http://localhost:<PORT>/jobs/<job_id>/tasks/<task>
-    },
-    "number_of_documents": integer,
-    "task": string // the API the task relates to, in this case zebedee
+    "task_name": <string value retrieved from event (task)>,
+    "number_of_documents": <integer value retrieved from event (count)>
 }
 ```
 
-**14: Create Zebedee task in datastore**
-
-Zebedee task created with number_of_documents set.
+**6: Insert Task document**
 
 ```
 Datastore: mongoDB
 Database: search
 Collection: tasks
-Document Identifier: `job_id` and `task` fields
+Query: Insert
+Document Identifier: task_name
 
-BSON Document create: {
-    "job_id": string,
-    "last_updated": ISODate, // ISO8601 timestamp
-    "links" : {
-        "self" : string // format: http://localhost:<PORT>/jobs/<job_id>/tasks/
-        "job": string // format: http://localhost:<PORT>/jobs/<job_id>/tasks/<task>
-    },
-    "number_of_documents": integer,
-    "task": string // the API the task relates to, in this case zebedee
+BSON Document: {
+    "task_name": <string, value received from kafka message (task)>,
+    "job_id": <string, value retrieved from kafka message (job_id)>,
+    "number_of_documents": <integer, value received from kafka message (count)>
 }
 ```
 
-Also update the reindex job, add the `number_of_documents`
-for Zebedee task to the existing `total_search_documents` count.
+**7: Update Reindex job - number_of_tasks**
+
+```
+Method: PATCH
+Path: /jobs/{id}
+Body: [
+    {
+        "op": "add",
+        "path": "/total_search_documents",
+        "value": <integer value retrieved from event (count)>
+    },
+    {
+        "op": "add",
+        "path": "number_of_tasks",
+        "value": 1
+    },
+    {
+        "op": "replace",
+        "path": "extraction_completed",
+        "value": <boolean value retrieved from event>
+    }
+]
+```
+
+If we are not handling add operation, then the Search Import Tracker will need to make GET request before using PATCH and calculate the actual values for `number_of_tasks` and `total_search_documents` and then use PATCH endpoint with replace operator.
+
+Do a read request and then write request (GET then PATCH) can introduce data races across microservices, so would need to use ETag header on GET response and add to IF-Match header on PATCH request to prevent updating job incorrectly. Possibility of getting a conflict, so will need to reprocess both GET and PATCH.
+
+**8: Update job document**
 
 ```
 Datastore: mongoDB
 Database: search
 Collection: jobs
-Document Identifier (id): job_id
+Query: Update
+Document Identifier: job id
 
-BSON Document update: {
-    "last_updated": ISODate, // ISO8601 timestamp
-    "total_search_documents": integer
+BSON Document: {
+    "total_search_documents": <new count value>,
+    "number_of_tasks": <new number of tasks value>,
+    "extraction_completed": <bool value from kafka message>
 }
 ```
 
-**15: Send Kafka messages**
+**9: Consume Kafka message from kafka search-data-imported**
 
-For each data type stored against Zebedee send a message to kafka topic.
+Tracker consumes messages from the search data imported topic, to update
+the number of documents that have now been stored in the new Elasticsearch index
+against a job.
 
 ```
-Datastore: kafka
-
-Topic: search-data-import
+Topic: search-data-imported
 Record: {
-    "data_type": string,
-    "job_id": string,
-    "search_index": string,
-    "cdid": string,
-    "dataset_id": string,
-    "description": string,
-    "edition": string,
-    "keywords": string,
-    "meta_description": string,
-    "release_date": string // date format: ISO8601 or strict_date_optional_time||epoch_millis to match existing docs in search?
-    "summary": string,
-    "title": string,
-    ... other fields we decide need to be in search
+    "job_id": string, // mandatory
+    "number_of_search_documents": integer // mandatory
 }
 ```
 
-**16: Retrieve list of datasets from Dataset API**
+See schema [here](https://github.com/ONSdigital/dp-search-reindex-tracker/blob/develop/schema/schema.go)
 
-Call Dataset API to retrieve a count of the number of (cmd) datasets as well as a list of datasets.
+**10: Get Reindex job**
 
 ```
+Headers: Authorisation
 Method: GET
-Path: /datasets?state=published
+Path: /jobs/{id}
 ```
 
-**17: Create Dataset API Task for reindex job**
+Keep hold of the ETag for next step used in the If-Match header.
 
-Create Dataset API task
+Combine the value of the `total_inserted_search_documents` with the
+`number_of_search_documents` from kafka message to represent the new
+`total_inserted_search_documents` value used in PATCH reuest.
 
-```
-API: Search Reindex
+Check the new value for `total_inserted_search_documents` matches the `total_search_documents` field in job document. If they are the same and the
+`extraction_completed` is set to true then the `state` will need to be updated
+to `completed` as part of the step 12.
 
-Method: POST
-Path: /jobs/{id}/tasks/{task}
-Body: {"number_of_documents": integer}
-```
-
-where `task` is set to dataset-api.
-
-```
-Status Code: 201
-Body: {
-    "job_id": string,
-    "last_updated": ISODate, // ISO8601 timestamp
-    "links" : {
-        "self" : string // format: http://localhost:<PORT>/jobs/<job_id>/tasks/
-        "job": string // format: http://localhost:<PORT>/jobs/<job_id>/tasks/<task>
-    },
-    "number_of_documents": integer,
-    "task": string // the API the task relates to, in this case dataset-api
-}
-```
-
-**18: Create Dataset API task in datastore**
-
-Dataset API task created with number_of_documents set.
-
-```
-Datastore: mongoDB
-Database: search
-Collection: tasks
-Document Identifier: `job_id` and `task` fields
-
-BSON Document create: {
-    "job_id": string,
-    "last_updated": ISODate, // ISO8601 timestamp
-    "links" : {
-        "self" : string // format: http://localhost:<PORT>/jobs/<job_id>/tasks/
-        "job": string // format: http://localhost:<PORT>/jobs/<job_id>/tasks/<task>
-    },
-    "number_of_documents": integer,
-    "task": string // the API the task relates to, in this case zebedee
-}
-```
-
-Also update the reindex job, add the `number_of_documents`
-for dataset API task to the existing `total_search_documents` count.
+**11: Find Reindex job**
 
 ```
 Datastore: mongoDB
 Database: search
 Collection: jobs
-Document Identifier (id): job_id
-
-BSON Document update: {
-    "last_updated": ISODate, // ISO8601 timestamp
-    "total_search_documents": integer
-}
+Query: FindOne
+Document Identifier: job id
 ```
 
-**19: Send Kafka messages**
-
-For each dataset doc send a message to kafka topic 
+**12: Update Reindex job - total_inserted_search_documents**
 
 ```
-Datastore: kafka
-
-Topic: search-data-import
-Record: {
-    "data_type": string,
-    "job_id": string,
-    "search_index": string,
-    "cdid": string,
-    "dataset_id": string,
-    "description": string,
-    "edition": string,
-    "keywords": string,
-    "meta_description": string,
-    "release_date": string // date format: ISO8601 or strict_date_optional_time||epoch_millis to match existing docs in search?
-    "summary": string,
-    "title": string,
-    ... other fields we decide need to be in search
-}
+Headers: Authorisation, If-Match
+Method: PATCH
+Path: /jobs/{id}
+Body: [
+    {
+        "op": "replace",
+        "path": "/total_inserted_search_documents",
+        "value": <integer>
+    },
+    {
+        "op": "replace",
+        "path": "state",
+        "value": "completed" // only if the total_inserted_search_documents is equal to the total_search_documents
+    }
+]
 ```
 
-**20: Bulk query to add docs to search index**
+Possibility of getting a conflict, so will need to reprocess both GET request in step 10 and PATCH in step 11.
 
-Documents received via consumption of kafka topic `search-data-import`, store documents in memory until 500 messages consumed or time from first 
-message exceeded 5 seconds before making bulk request. 5 second limit will allow for the last set of messages to still be reindexed.
-
-```
-Datastore: elasticsearch
-Index: search_index
-
-Method: POST
-Path: /_bulk
-Body: Depends on data type
-```
-
-See [Bulk API](https://www.elastic.co/guide/en/elasticsearch/reference/current/docs-bulk.html)
-
-Extension to handle failure scenarios:
-
-If bulk request fails then we should requeue events consumed with an additional attempts field. Once an event has failed more than 3 attempts, we should send request to reindex API to update state to failed and not requeue event. (Design needs to be thought through - should we be using a new kafka topic to handle these events?)
-
-**21: Update uploaded document count for reindex job**
-
-```
-Method: PUT 
-Path: /jobs/{id}/inserted-documents/{count}
-```
-
-**22: Update job doc**
+**13: Update Reindex job**
 
 ```
 Datastore: mongoDB
 Database: search
 Collection: jobs
-Document Identifier (id): job.id
+Query: Update
+Document Identifier: job id
 
-BSON Document update: {
-    "last_updated": ISODate, // ISO8601 timestamp
-    "total_inserted_search_documents": integer
+BSON Document: {
+    "total_inserted_search_documents": <integer>,
 }
 ```
 
-*Note: When updating the count, this should be adding to the current value*
-
-Check counts match: `"total_inserted_search_documents" is equal to "total_search_documents"` and `number_of_tasks` is equal to the number of tasks returned requesting a list of tasks for particular job id in datastore
-
-**23: POST ONS alias to search index**
-
-Call elasticsearch to check the index count matches the `total_search_documents` value.
+**14: Search Reindex API requests alias swap and deletion of previous index**
 
 ```
-Datastore: elasticsearch
-
+Headers: Authorisation
 Method: POST
-Path: /search/{index}/alias
+Path: /search/{index}/aliases/{alias} // alias should always be "ONS"
+Query Params
+  - delete_current_aliased_index = bool (true/false)
 ```
 
-**24: Validate search index document count**
+**15: API router reverse proxies request to alias swap and deletion of previous index**
 
-Call elasticsearch to check the index count matches the `total_search_documents` value.
+Request hits the API router before reaching Search API (step 15)
 
-```
-Datastore: elasticsearch
+API router will authenticate the user or service before sending
+on request via reverse proxy and then store the outcome in audit system.
 
-Method: GET
-Path: /{index}/_count
-```
-
-Wait before making a new request (attempt) to a maximum of 3?
-
-**25: Multi-operational request to update aliases**
+**16: Multi-operational request to update aliases**
 
 See [index alias API](https://www.elastic.co/guide/en/elasticsearch/reference/current/indices-aliases.html) to see how this is done
 
@@ -537,18 +576,14 @@ Method: POST
 Path: /_aliases
 Body: {
     "actions" : [
-    {"remove": {"index" : "<new-index>", "alias" : "new-ONS"}},
     {"remove": {"index" : "<old-index>", "alias" : "ONS"}},
     {"add" : {"index" : "<new-index>", "alias" : "ONS" }},
-    {"remove-index" : {"index" : "<old-index>"}},
+    {"remove-index" : {"index" : "<old-index>"}}, // assuming `delete_current_aliased_index` was set to true otherwise dont include
   ]
 }
 ```
 
-Note: alias `new-ONS` may not be needed in performing a reindex, it may just be less cumbersome and more obvious to a developer to use
-new-ONS and ONS to refer to the new index and an existing index respectively instead of the index name (e.g. comparing 2 ONS-<datetime> values).
-
-**26: Update Reindex job state to completed**
+**17: Update Reindex job state to completed**
 
 ```
 Datastore: mongoDB
@@ -567,16 +602,7 @@ BSON Document update: {
 
 If the reindex job fails, we should be updating the job document accordingly with a `"reindex_failed": ISODate, "state": "failed"`.
 
-Use the following PUT endpoint on Search Reindex API:
-
 Update Reindex Job state to failed
-
-```
-API: Search Reindex
-
-Method: PUT
-Path: /jobs/{id}/state/{state} // where state is set to "failed"
-```
 
 Search Reindex API -> datastore
 
@@ -592,9 +618,3 @@ BSON Document update: {
     "state": "failed"
 }
 ```
-
-### Tracking Search Reindex Job
-
-![Tracking search reindex job](sequence/trigger-search-reindex-tracker/trigger-search-reindex-tracker.png)
-
-#### Steps
